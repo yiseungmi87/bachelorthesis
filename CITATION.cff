@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+authors:
+  - family-names: "Lee"
+    given-names: "Seungmi"
+title: "Query Relaxation for Numerical Query Predicates"
+version: "1.0.0"
+date-released: "2023-08-19"
+repository-code: "https://github.com/yiseungmi87/bachelorthesis.git"
