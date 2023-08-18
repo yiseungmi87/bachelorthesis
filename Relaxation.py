@@ -8,6 +8,9 @@ from kneed import KneeLocator
 import random
 import time
 import statistics
+import warnings
+from sklearn.exceptions import ConvergenceWarning
+
 
 # Read the dataset ids from the file
 with open('selected_dataset_ids.txt', 'r') as file:
@@ -213,6 +216,9 @@ class ScalarToCluster(RelaxationRule):
         self.datasets = datasets
 
     def relax_query(self, query, predicate_indices=None):
+        # Ignore convergence warnings
+        warnings.simplefilter("ignore", ConvergenceWarning)
+
         relaxed_query = Query()
         predicates_to_cluster = []
         # If no predicate indices are specified, cluster all predicates
@@ -702,7 +708,7 @@ def measure_execution_time():
 if __name__ == "__main__":
     measure_execution_time()
 '''
-'''
+
 # Experiment4: Counting the Usage of Each Strategy
 def count_usage():
 
@@ -756,4 +762,3 @@ def count_usage():
             
 if __name__ == "__main__":
     count_usage()
-'''
