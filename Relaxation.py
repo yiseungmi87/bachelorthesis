@@ -6,6 +6,8 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import MinMaxScaler
 from kneed import KneeLocator
 import random
+import time
+import statistics
 
 # Read the dataset ids from the file
 with open('selected_dataset_ids.txt', 'r') as file:
@@ -18,8 +20,8 @@ for dataset_id in dataset_ids:
         dataset_info = json.load(file)
     selected_datasets.append(dataset_info)
 
-for dataset_info in selected_datasets:
-    print(f"Dataset with ID: {dataset_info['dataset_id']}")
+#for dataset_info in selected_datasets:
+    #print(f"Dataset with ID: {dataset_info['dataset_id']}")
 
 class Predicate:
     def __init__(self, key, operator, value, nested_predicate=None):
@@ -80,7 +82,7 @@ class RelaxationRule(ABC):
     def relax_query(self, query):
         self._validate_predicates(query.predicates)
 
-
+    # Helper method to determine whether a predicate should be relaxed
     def _should_relax(self, index, predicate_indices):
         if predicate_indices is None:
             return True
@@ -93,13 +95,12 @@ class RelaxationRule(ABC):
     # Helper method to get the values of a predicate from a list of datasets
     def _extract_values(self, predicate, datasets):
         if predicate.key.startswith('features.'):
-            # Split the key into components
             key_parts = predicate.key.split('.')
-            # The second part is the feature name, the last part is the attribute
             feature_name = key_parts[1]
             attribute = key_parts[-1]
             # Get the attribute value for all features with this name in all datasets
             values = [feature[attribute] for dataset in datasets for feature in dataset['features'] if feature['name'] == feature_name]
+
         else:
             # The predicate refers to a quality of the dataset, get the quality values from all datasets
             values = [dataset['qualities'].get(predicate.key) for dataset in datasets]
@@ -108,35 +109,35 @@ class RelaxationRule(ABC):
         values = [0 if value is None else value for value in values]
         return values
     
+    # Helper method to validate the predicates
     def _validate_predicates(self, predicates):
         for predicate in predicates:
             # Validate key
             if not hasattr(predicate, 'key') or not hasattr(predicate, 'operator') or not hasattr(predicate, 'value'):
                 raise ValueError("Each predicate must contain 'key', 'operator', and 'value' properties")
-                
+            
             # Validate operator
             valid_operators = ['=', '<', '>', '<=', '>=', 'range']
             if predicate.operator not in valid_operators:
                 raise ValueError(f"Invalid operator '{predicate.operator}'. Operator must be one of {valid_operators}")
 
-class ScalarToRange(RelaxationRule): # only scalar
+class ScalarToRange(RelaxationRule): 
     def __init__(self, datasets, k):
         self.datasets = datasets
         self.k = k
 
     def relax_query(self, query, predicate_indices=None):
-        
         relaxed_query = Query()        
         for i, (predicate, conjunction) in enumerate(zip(query.predicates, query.conjunctions + [None])):
             if self._should_relax(i, predicate_indices):
                 self._validate_predicates(query.predicates)    
-            
-                if predicate.operator == '=':
+
                 # If the predicate is an equality, change it to a range
-                # Calculate the mean and standard deviation
+                if predicate.operator == '=':                
                     values = self._extract_values(predicate, self.datasets)
                     stddev_value = statistics.stdev(values)
-                # Define a range around the mean
+
+                    # Define a range around the mean
                     lower_bound = round(predicate.value - self.k * stddev_value)
                     upper_bound = round(predicate.value + self.k * stddev_value)
 
@@ -153,17 +154,21 @@ class ScalarToRange(RelaxationRule): # only scalar
                     if predicate.key not in negative_keys:
                         lower_bound = max(0, lower_bound)
 
-                # Define a new predicate with the range
+                    # Define a new predicate with the range
                     predicate = Predicate(predicate.key, 'range', (lower_bound, upper_bound))
                     relaxed_query.add_predicate(predicate, conjunction)
+
                 else:
-                # If the operator is not '=', copy the predicate unchanged
+                    # If the operator is not '=', copy the predicate unchanged
                     relaxed_query.add_predicate(predicate, conjunction)       
             else:
-                relaxed_query.add_predicate(predicate, conjunction)     
+                # If the predicate is not relaxed, copy it unchanged
+                relaxed_query.add_predicate(predicate, conjunction) 
+
         return relaxed_query
     
-class ScalarToQuartile(RelaxationRule): #Only scalar value or a range with an open end (no interval)
+
+class ScalarToQuartile(RelaxationRule):
     def __init__(self, datasets):
         self.datasets = datasets
 
@@ -173,11 +178,12 @@ class ScalarToQuartile(RelaxationRule): #Only scalar value or a range with an op
             if self._should_relax(i, predicate_indices):
                 self._validate_predicates(query.predicates)
 
-            # For an interval predicate, keep it as it is
+                # For an interval predicate, no change is needed
                 if predicate.operator == 'range' and isinstance(predicate.value, tuple):
                     relaxed_query.add_predicate(predicate, conjunction)
-                    continue # immediately go to the beginning of the loop, skipping any code below
+                    continue 
             
+                # For a non-interval predicate, determine the quartile of the predicate value
                 values = self._extract_values(predicate, self.datasets)
                 values = np.array(values)
                 values[np.where(values==None)] = 0
@@ -190,40 +196,49 @@ class ScalarToQuartile(RelaxationRule): #Only scalar value or a range with an op
                     quartile = 'third'
                 else:
                     quartile = 'top'
+
                 # Define a new predicate with the quartile
                 relaxed_predicate = Predicate(predicate.key, 'quartile', quartile)
                 # Add the new predicate to the relaxed query
                 relaxed_query.add_predicate(relaxed_predicate, conjunction)
             else:
-                relaxed_query.add_predicate(predicate, conjunction)            
+                # If the predicate is not relaxed, copy it unchanged
+                relaxed_query.add_predicate(predicate, conjunction)      
+
         return relaxed_query
     
-class AttributesToCluster(RelaxationRule):
+
+class ScalarToCluster(RelaxationRule):
     def __init__(self, datasets):
         self.datasets = datasets
 
     def relax_query(self, query, predicate_indices=None):
-
         relaxed_query = Query()
         predicates_to_cluster = []
+        # If no predicate indices are specified, cluster all predicates
         if predicate_indices is None:
             predicates_to_cluster = query.predicates
+        # Otherwise, cluster only the specified predicates
         else:
+            # Collect the predicates to be clustered
             predicates_to_cluster = [query.predicates[i] for i in predicate_indices]
 
         # Collect the attribute values for each predicate
         attribute_values_by_predicate = {}
         for i, (predicate, conjunction) in enumerate(zip(query.predicates, query.conjunctions + [None])):
+            # If the predicate is to be clustered, collect its attribute values
             if self._should_relax(i, predicate_indices) and predicate.operator == '=':
                 self._validate_predicates(query.predicates)
+                # Collect the attribute values for each dataset
                 attribute_values_by_predicate[predicate] = [
                     self._extract_values(predicate, [dataset])[0]
                     for dataset in self.datasets
                 ]
             else:
+                # If the predicate is not to be clustered, copy it unchanged
                 relaxed_query.add_predicate(predicate, conjunction)
 
-        # Return the original query if there are no predicates to relax
+        # If no predicates are to be clustered, return the original query
         if not attribute_values_by_predicate:
             return query
 
@@ -261,7 +276,8 @@ class AttributesToCluster(RelaxationRule):
 
         return relaxed_query
 
-class MeanToMinOrMax(RelaxationRule):
+
+class MeanToMinMax(RelaxationRule):
     def __init__(self, datasets):
         self.datasets = datasets
 
@@ -270,6 +286,7 @@ class MeanToMinOrMax(RelaxationRule):
         for i, (predicate, conjunction) in enumerate(zip(query.predicates, query.conjunctions + [None])):
             if self._should_relax(i, predicate_indices):
                 self._validate_predicates(query.predicates)
+
                 # Check if the predicate key starts with 'Mean'
                 if predicate.key.startswith('Mean'):
                     # Compute the median differences
@@ -282,7 +299,8 @@ class MeanToMinOrMax(RelaxationRule):
                             value_min, value_max = predicate.value, predicate.value
                         else:
                             value_min, value_max = predicate.value
-
+                        
+                        # Determine the new key and value based on the operator for interval predicates
                         new_key_min = predicate.key.replace('Mean', 'Min')
                         new_value_min = value_min + median_difference_min
                         new_key_max = predicate.key.replace('Mean', 'Max')
@@ -293,7 +311,7 @@ class MeanToMinOrMax(RelaxationRule):
                         relaxed_query.add_predicate(relaxed_predicate_min, conjunction)
                         relaxed_predicate_max = Predicate(new_key_max, '<', new_value_max)
                         relaxed_query.add_predicate(relaxed_predicate_max, conjunction)
-                        
+            
                     else:
                         # Determine the new key and value based on the operator for scalar predicates
                         if predicate.operator in ['<', '<=']:
@@ -304,10 +322,12 @@ class MeanToMinOrMax(RelaxationRule):
                             new_key = predicate.key.replace('Mean', 'Min')
                             new_value = predicate.value + median_difference_min
                             operator = predicate.operator
+
                         else:
                             # If the operator is not <, <=, >, >=, =, copy the predicate
                             relaxed_query.add_predicate(predicate, conjunction)
                             continue
+
                         # Create the new relaxed predicate
                         relaxed_predicate = Predicate(new_key, operator, new_value)
                         relaxed_query.add_predicate(relaxed_predicate, conjunction)
@@ -321,46 +341,96 @@ class MeanToMinOrMax(RelaxationRule):
         return relaxed_query
 
     def _compute_median_difference(self, predicate, suffix):
-        """
-        Computes the median difference between the max/min and mean value of the attribute defined by the predicate across all datasets.
-        """
+        # Determine the attribute name
         attribute = predicate.key.replace('Mean', '',1)
+
         differences = []
         for dataset in self.datasets:
+            # Get the mean and target values
             mean_value = dataset['qualities']['Mean' + attribute]
             target_value = dataset['qualities'][suffix + attribute]
+
+            # Skip NaN values
             if np.isnan(mean_value) or np.isnan(target_value):
                 continue
+
+            # Compute the difference
             differences.append(target_value - mean_value)
+
+        # If no non-NaN values are found, raise an error
         if len(differences) == 0:
             raise ValueError(f"No non-NaN values found")
+        
         return statistics.median(differences)
 
-class AbsoluteCountToProportional(RelaxationRule):
-    def __init__(self, datasets, range_percentage=0.1):
+class CountToRatio(RelaxationRule):
+    def __init__(self, datasets, range=0.1):
         self.datasets = datasets
-        self.RANGE_PERCENTAGE = range_percentage
+        self.range = range
 
-    def _calculate_ratio(self, value, total):
+    def relax_query(self, query, predicate_indices):
+        relaxed_query = Query()
+        for i, (predicate, conjunction) in enumerate(zip(query.predicates, query.conjunctions + [None])):
+            if self._should_relax(i, predicate_indices):
+                self._validate_predicates(query.predicates)
+
+                total = None
+                
+                # Check if the predicate key starts with 'NumberOf'
+                if predicate.key in ['NumberOfNumericFeatures', 'NumberOfSymbolicFeatures', 'NumberOfFeaturesWithMissingValues', 'NumberOfInstancesWithMissingValues', 'NumberOfMissingValues']:
+                    # Compute the total
+                    total = self._compute_average('NumberOfFeatures' if 'Features' in predicate.key else 'NumberOfInstances' if 'Instances' in predicate.key else 'NumberOfValues')
+                    new_key = predicate.key + "_ratio"
+
+                # Check if the predicate key starts with 'features.'
+                elif predicate.key.startswith('features.') and predicate.key != 'features.country.percentage_missing_values':
+                    feature_name = predicate.key.split('.')[1]
+                    feature_feature = predicate.key.split('.')[2]
+                    
+                    if feature_feature in ['number_unique_values', 'number_missing_values']:
+                        total = self._compute_average('NumberOfInstances')
+                        new_key = 'features.' + feature_name + '.' + feature_feature + '_ratio'
+                else:
+                    # If the key does not start with 'NumberOf' or 'features.', copy the predicate and continue
+                    relaxed_query.add_predicate(predicate, conjunction)
+                    continue
+                
+                # Compute the percentage
+                percentage = self._calculate_percentage(predicate.value, total)
+
+                # Check if the predicate is a scalar predicate with = operator
+                if predicate.operator in ['=']:
+                    percentage_range = self._create_range(percentage)  # Create the range
+                    relaxed_predicate = Predicate(new_key, 'range', percentage_range)  # Use 'range' as the operator
+
+                else:
+                    # Create the new relaxed predicate
+                    relaxed_predicate = Predicate(new_key, predicate.operator, percentage)
+
+                relaxed_query.add_predicate(relaxed_predicate, conjunction)
+
+            else:
+                # If an index is specified and this isn't it, copy the predicate and continue
+                relaxed_query.add_predicate(predicate, conjunction)
+
+        return relaxed_query
+    
+    def _calculate_percentage(self, value, total):
+        # Check if the total is valid
         if total is None:
             raise ValueError("The total should not be None")
         elif total == 0:
             raise ValueError("The total should not be zero")
         else:
+            # Check if the value is a tuple
             if isinstance(value, tuple):
-                return tuple(v / total for v in value)
+                return tuple((v / total) * 100 for v in value)
             else:
-                return value / total
+                return (value / total) * 100
     
     def _create_range(self, value):
-        """Create a range around the value."""
-        if isinstance(value, tuple):
-            delta_low = value[0] * self.RANGE_PERCENTAGE
-            delta_high = value[1] * self.RANGE_PERCENTAGE
-            return (value[0] - delta_low, value[1] + delta_high)
-        else:
-            delta = value * self.RANGE_PERCENTAGE
-            return (value - delta, value + delta)
+        width = value * self.range
+        return (value - width, value + width)
         
     def _compute_average(self, attribute):
         values = []
@@ -378,43 +448,9 @@ class AbsoluteCountToProportional(RelaxationRule):
             raise ValueError(f"No non-NaN values found for attribute {attribute}")
         return sum(values) / len(values)
     
-    def relax_query(self, query, predicate_indices):
-        relaxed_query = Query()
-        for i, (predicate, conjunction) in enumerate(zip(query.predicates, query.conjunctions + [None])):
-            if self._should_relax(i, predicate_indices):
-                self._validate_predicates(query.predicates)
-
-                total = None
-                if predicate.key in ['NumberOfNumericFeatures', 'NumberOfSymbolicFeatures', 'NumberOfFeaturesWithMissingValues', 'NumberOfInstancesWithMissingValues', 'NumberOfMissingValues']:
-                    total = self._compute_average('NumberOfFeatures' if 'Features' in predicate.key else 'NumberOfInstances' if 'Instances' in predicate.key else 'NumberOfValues')
-                    new_key = predicate.key + "_ratio"
-                elif predicate.key.startswith('features.') and predicate.key != 'features.country.percentage_missing_values':
-                    feature_name = predicate.key.split('.')[1]
-                    feature_feature = predicate.key.split('.')[2]
-                    if feature_feature in ['number_unique_values', 'number_missing_values']:
-                        total = self._compute_average('NumberOfInstances')
-                        new_key = 'features.' + feature_name + '.' + feature_feature + '_to_ratio'
-                else:
-                    relaxed_query.add_predicate(predicate, conjunction)
-                    continue
-                
-                percentage = self._calculate_ratio(predicate.value, total) * 100
-                
-                if predicate.operator in ['=', 'range']:
-                    percentage_range = self._create_range(percentage)  # Create the range
-                    relaxed_predicate = Predicate(new_key, 'range', percentage_range)  # Use 'range' as the operator
-                else:
-                    relaxed_predicate = Predicate(new_key, predicate.operator, percentage)
-                #percentage_range = self._create_range(percentage)  # Create the range
-                #relaxed_predicate = Predicate(new_key, 'range', percentage_range)  # Use 'range' as the operator
-                relaxed_query.add_predicate(relaxed_predicate, conjunction)
-            else:
-                relaxed_query.add_predicate(predicate, conjunction)
-
-        return relaxed_query
         
-class TotalToAttribute(RelaxationRule):
-    def __init__(self, proportion):
+class TotalToFeature(RelaxationRule):
+    def __init__(self, proportion=0.75):
         self.proportion = proportion
 
     def relax_query(self, query, predicate_indices=None):
@@ -426,6 +462,7 @@ class TotalToAttribute(RelaxationRule):
             if self._should_relax(i, predicate_indices):
                 self._validate_predicates(query.predicates)
                 
+                # Check if the predicate key is applicable
                 if predicate.key == 'PercentageOfMissingValues':
                     nested_predicate = Predicate(predicate.key, predicate.operator, predicate.value)
                     relaxed_predicate = Predicate('attr_proportion', '>=', self.proportion, nested_predicate)
@@ -438,68 +475,20 @@ class TotalToAttribute(RelaxationRule):
                     # If the predicate's key does not match any conditions, copy the predicate and continue
                     relaxed_query.add_predicate(predicate, conjunction)
             else:
-                # If an index is specified and this isn't it, copy the predicate and continue
+                # If the predicate should not be relaxed, copy the predicate and continue
                 relaxed_query.add_predicate(predicate, conjunction)
 
         return relaxed_query
-
-
-def test_relaxation_strategies():
-    # Given a loaded dataset, selected_dataset
-
-    # Defining various predicates
-    predicates = [
-        Predicate("NumberOfInstances", "=", 100000),
-        Predicate('NumberOfNumericFeatures', '>', 10),
-        Predicate("PercentageOfMissingValues", "<", 5),
-    ]
-
-    # Creating queries
-    query = Query() 
-    query.add_predicate(predicates[0], "AND")
-    query.add_predicate(predicates[1], "AND")
-    query.add_predicate(predicates[2])
-
-    # Defining relaxation strategies
-    relaxation_strategies = [
-        ScalarToRange(selected_datasets, k=1),
-        ScalarToRange(selected_datasets, k=2),
-        AbsoluteCountToProportional(selected_datasets, 0.01),
-        AbsoluteCountToProportional(selected_datasets, 0.05),
-        TotalToAttribute(0.75),
-        TotalToAttribute(0.5),
-    ]
-
-    relaxed_1 = query_relaxation(query, relaxation_strategies[0], 0)
-    print(relaxed_1.predicates[0])
-    relaxed_2 = query_relaxation(query, relaxation_strategies[1], 0)
-    print(relaxed_2.predicates[0])
-    relaxed_3 = query_relaxation(query, relaxation_strategies[2], 1)
-    print(relaxed_3.predicates[1])
-    relaxed_4 = query_relaxation(query, relaxation_strategies[3], 1)
-    print(relaxed_4.predicates[1])
-    relaxed_5 = query_relaxation(query, relaxation_strategies[4], 2)
-    print(relaxed_5.predicates[2])
-    relaxed_6 = query_relaxation(query, relaxation_strategies[5], 2)
-    print(relaxed_6.predicates[2])
-
-    # Defining the indices to be used with each strategy
-    indices = [0, 0, 1, 1, 2, 2]
-
-# Loop over both strategies and indices
-    for i, (strategy, index) in enumerate(zip(relaxation_strategies, indices)):
-        relaxed_query = query_relaxation(query, strategy, index)
-        print(relaxed_query.predicates[index])
-
-
-if __name__ == "__main__":
-    test_relaxation_strategies()
-
-
-'''
-import random
-import time
-
+    
+class BaselineRelaxation:
+    def relax_query(self, query, predicate_indices=None):
+        #Removes the last predicate from a given query and returns a new query.
+        new_query = Query() 
+        new_query.predicates = query.predicates[:-1]  # Copy all predicates except the last
+        new_query.conjunctions = query.conjunctions[:-1] if query.conjunctions else []  # Remove the last conjunction if there is any
+        
+        return new_query
+    
 # Define the keys and operators.
 predicate_keys = ['features.country.number_missing_values', 
 'features.country.percentage_missing_values', 
@@ -527,99 +516,42 @@ predicate_keys = ['features.country.number_missing_values',
 operators = ['>', '<', '=', '>=', '<=', 'range']
 conjunctions = ['AND']
 
-# Define initial strategy usage
-strategy_usage = {
-    'ScalarToRange': 0,
-    'ScalarToQuartile': 0,
-    'AttributesToCluster': 0,
-    'AbsoluteCountToProportional': 0,
-    'TotalToAttribute': 0,
-    'MeanToMinOrMax': 0 
-}
+def generate_random_queries(num_queries, seed=None):
 
-# Define relaxation strategies
-relaxation_strategies = [
-    ScalarToRange(selected_datasets, k=1),
-    ScalarToQuartile(selected_datasets),
-    AttributesToCluster(selected_datasets),
-    AbsoluteCountToProportional(selected_datasets),
-    TotalToAttribute(0.75),
-    MeanToMinOrMax(selected_datasets)
-]
-
-# Number of times to run the whole procedure
-iterations = 10
-
-for iteration in range(iterations):
-    print(f"\nIteration {iteration+1} of {iterations}")
-
-    # Reset usage counts for this iteration
-    iteration_usage = strategy_usage.copy()
+    if seed is not None:
+        random.seed(seed)
 
     random_queries = []
-    for i in range(20):
+    
+    for _ in range(num_queries):
         query = Query()
-        for j in range(random.randint(1, 5)):  # Randomly choose between 1 to 5 predicates.
-            key = random.choice(predicate_keys)
-            operator = random.choice(operators)
-            value = (random.randint(0, 50), random.randint(51, 100)) if operator == 'range' else random.randint(0, 100)
-            conjunction = random.choice(conjunctions) if j != 0 else None
-            predicate = Predicate(key, operator, value)
+        num_predicates = random.randint(1, 5)  # Choose between 1 to 5 predicates.
+
+        # Randomly select predicates from the list of keys (no repetition).
+        selected_keys = random.sample(predicate_keys, num_predicates)
+        
+        for j, key in enumerate(selected_keys):
+            operator = random.choice(operators)  # Randomly choose an operator.
+            value = (random.randint(0, 50), random.randint(51, 100)) if operator == 'range' else random.randint(0, 100)  # Randomly choose a value.
+            conjunction = 'AND' if j != 0 else None  # Use 'AND' as conjunction if it is not the first predicate.
+            
+            predicate = Predicate(key, operator, value) 
             query.add_predicate(predicate, conjunction)
         random_queries.append(query)
+    
+    return random_queries
 
-    # Print the generated queries.
-    for i, query in enumerate(random_queries):
-        print(f"Query {i+1}: {query}")
+# Generate 20 random queries. (reusable)
+benchmark_queries = generate_random_queries(20, seed=1)
+#print(benchmark_queries)
 
-
-class BaselineRelaxation:
-    def relax_query(self, query, predicate_indices=None):
-        #Removes the last predicate from a given query and returns a new query.
-        new_query = Query() 
-        new_query.predicates = query.predicates[:-1]  # Copy all predicates except the last
-        new_query.conjunctions = query.conjunctions[:-1] if query.conjunctions else []  # Remove the last conjunction if there is any
-        return new_query
-
-    # Testing each strategy
-    for strategy in relaxation_strategies:
-        print(f"\nTesting strategy: -------------- {strategy.__class__.__name__}------------------")
-        for query in random_queries:
-            print(f"\nOriginal query: {query}")               
-            relaxed_query = query_relaxation(query, strategy)
-            if str(relaxed_query) != str(query):
-                print(f"Relaxed query: {relaxed_query}")
-                strategy_usage[strategy.__class__.__name__] += 1
-            else:
-                print("The query was not relaxed.")
-
-# Calculate and print average usage for each strategy
-for strategy, total_usage in strategy_usage.items():
-    avg_usage = total_usage / iterations
-    print(f"{strategy}: {avg_usage} times on average")
-
-# Identify the strategy with the highest average coverage
-max_strategy = max(strategy_usage, key=strategy_usage.get)
-print(f"The strategy with the highest average coverage is {max_strategy}.")
-
-# Identify strategies that were never used on average
-unused_strategies = [strategy for strategy, avg_usage in strategy_usage.items() if avg_usage == 0]
-print(f"Strategies that were never used on average: {', '.join(unused_strategies)}")
-
-import time
-import statistics
-
-def test_relaxation_strategies():
-    # Given a loaded dataset, selected_dataset
-
+'''
+# Experiment1: Demonstration of relaxation strategies
+def demonstrate_relaxation_strategies():
     # Defining various predicates
     predicates = [
-        
         Predicate("MeanNominalAttDistinctValues", "=", 10),
         Predicate('features.country.number_missing_values', '=', 3),
-
-        #Predicate("PercentageOfMissingValues", "=", 3),
-        
         Predicate("MeanNominalAttDistinctValues", ">", 10),
         Predicate('features.country.number_missing_values', "range", (10, 20))      
     ]
@@ -627,14 +559,11 @@ def test_relaxation_strategies():
     # Creating queries
     query1 = Query() 
     query1.add_predicate(predicates[0])
-
     query2 = Query() 
     query2.add_predicate(predicates[1])
-
     query3 = Query() 
     query3.add_predicate(predicates[0], "AND")
     query3.add_predicate(predicates[1])
-
     query4 = Query()
     query4.add_predicate(predicates[2], "AND")
     query4.add_predicate(predicates[3], "AND")
@@ -647,10 +576,10 @@ def test_relaxation_strategies():
         BaselineRelaxation(),
         ScalarToRange(selected_datasets, k=1),
         ScalarToQuartile(selected_datasets),
-        AttributesToCluster(selected_datasets),
-        AbsoluteCountToProportional(selected_datasets),
-        TotalToAttribute(0.75),
-        MeanToMinOrMax(selected_datasets)
+        MeanToMinMax(selected_datasets),
+        ScalarToCluster(selected_datasets),
+        CountToRatio(selected_datasets),
+        TotalToFeature(0.75),
     ]
 
     # Number of iterations for each experiment
@@ -661,85 +590,170 @@ def test_relaxation_strategies():
         print(f"\nTesting strategy: {strategy.__class__.__name__}")
         for query in queries:
             print(f"\nOriginal query: {query}")
-            
             execution_times = []
             for _ in range(num_iterations):
                 # Start time
                 start_time = time.time()
-                
+
+                # Relaxing the query
                 relaxed_query = query_relaxation(query, strategy)
-                
+
                 # End time
                 end_time = time.time()
                 execution_time = end_time - start_time
-                
                 execution_times.append(execution_time)
-                
+
             avg_execution_time = statistics.mean(execution_times)
-            
-            print(f"Relaxed query: {relaxed_query}")
+            if str(relaxed_query) != str(query):
+                print(f"Relaxed query: {relaxed_query}")
+            else:
+                print("The query was not relaxed.")
             print(f"Average execution time over {num_iterations} iterations: {avg_execution_time} seconds")
+
+if __name__ == "__main__":
+    demonstrate_relaxation_strategies()
+'''
+'''
+# Experiment2: Application of Different Strategies for Each Predicate
+def apply_each_predicate():
+
+    # Defining various predicates
+    predicates = [
+        Predicate("NumberOfInstances", "=", 100000),
+        Predicate('NumberOfNumericFeatures', '=', 10),
+        Predicate("PercentageOfMissingValues", "<", 5),
+    ]
+
+    # Creating queries
+    query = Query() 
+    query.add_predicate(predicates[0], "AND")
+    query.add_predicate(predicates[1], "AND")
+    query.add_predicate(predicates[2])
+
+    # Defining relaxation strategies
+    relaxation_strategies = [
+        ScalarToRange(selected_datasets, k=1),
+        ScalarToRange(selected_datasets, k=2),
+        CountToRatio(selected_datasets, 0.01),
+        CountToRatio(selected_datasets, 0.05),
+        TotalToFeature(0.75),
+        TotalToFeature(0.5),
+    ]
+    # Defining the indices to be used with each strategy
+    indices = [0, 0, 1, 1, 2, 2]
+
+# Loop over both strategies and indices
+    for i, (strategy, index) in enumerate(zip(relaxation_strategies, indices)):
+        relaxed_query = query_relaxation(query, strategy, index)
+        print(relaxed_query.predicates[index])
 
 
 if __name__ == "__main__":
-    test_relaxation_strategies()
+    apply_each_predicate()
+'''
 
-# Queries to be used
-queries_fixed = random_queries
-print(queries_fixed)
-
-def test_relaxation_strategies_30():
-    # Given a loaded dataset, selected_dataset   
+'''
+# Experiment3: Measure Execution Time for 20 benchmark queries
+def measure_execution_time():
+    
+    for i, query in enumerate(benchmark_queries):
+        print(f"Query {i+1}: {benchmark_queries}")
 
     # Defining relaxation strategies
     relaxation_strategies = [
         BaselineRelaxation(),
         ScalarToRange(selected_datasets, k=1),
         ScalarToQuartile(selected_datasets),
-        AttributesToCluster(selected_datasets),
-        AbsoluteCountToProportional(selected_datasets, 0.01),
-        TotalToAttribute(0.75),
-        MeanToMinOrMax(selected_datasets)
+        MeanToMinMax(selected_datasets),
+        ScalarToCluster(selected_datasets),
+        CountToRatio(selected_datasets),
+        TotalToFeature(0.75),
     ]
 
     # Number of iterations for each experiment
     num_iterations = 10   
 
-    for query in queries_fixed:
-            print(f"\nOriginal query: {query}")
     # Testing each strategy
     for strategy in relaxation_strategies:
         print(f"\nTesting strategy: {strategy.__class__.__name__}")
-
-        for query in queries_fixed:
+        for query in benchmark_queries:
             #print(f"\nOriginal query: {query}")
-            
             execution_times = []
             for _ in range(num_iterations):
                 # Start time
                 start_time = time.time()
-                
+
+                # Relaxing the query
                 relaxed_query = query_relaxation(query, strategy)
-                
+
                 # End time
                 end_time = time.time()
                 execution_time = end_time - start_time
-                
                 execution_times.append(execution_time)
-                
-            avg_execution_time = statistics.mean(execution_times)
-            
-            #print(f"Relaxed query: {relaxed_query}")
-            if str(relaxed_query) != str(query):
-                print(f"Average execution time over {num_iterations} iterations: {avg_execution_time} seconds")
-                
-            else:
-                print(f"Average execution time over {num_iterations} iterations: 0 seconds")
-            
 
+            avg_execution_time = statistics.mean(execution_times)
+            if str(relaxed_query) != str(query):
+                print(f"({benchmark_queries.index(query)+1}, {avg_execution_time}) ")
+            else:
+                print(f"({benchmark_queries.index(query)+1}, 0) ")
+
+            #print(f"Average execution time over {num_iterations} iterations: {avg_execution_time} seconds")
 
 if __name__ == "__main__":
-    test_relaxation_strategies_30()
+    measure_execution_time()
+'''
+'''
+# Experiment4: Counting the Usage of Each Strategy
+def count_usage():
 
-print(queries_fixed)
+    # Define initial strategy usage
+    strategy_usage = {
+    'ScalarToRange': 0,
+    'ScalarToQuartile': 0,
+    'ScalarToCluster': 0,
+    'MeanToMinMax': 0,
+    'CountToRatio': 0,
+    'TotalToFeature': 0,
+}
+
+    # Define relaxation strategies
+    relaxation_strategies = [
+    ScalarToRange(selected_datasets, k=1),
+    ScalarToQuartile(selected_datasets),
+    ScalarToCluster(selected_datasets),
+    MeanToMinMax(selected_datasets),
+    CountToRatio(selected_datasets),
+    TotalToFeature(proportion=0.75)
+]
+    iterations = 10
+
+    for iteration in range(iterations):
+
+        random_queries = generate_random_queries(30)
+
+    # Testing each strategy
+        for strategy in relaxation_strategies:
+        #print(f"\nTesting strategy: {strategy.__class__.__name__}")
+            for query in random_queries:
+            #print(f"\nOriginal query: {query}")               
+                relaxed_query = query_relaxation(query, strategy)
+                if str(relaxed_query) != str(query):
+                #print(f"Relaxed query: {relaxed_query}")
+                    strategy_usage[strategy.__class__.__name__] += 1
+
+    # Calculate and print average usage for each strategy
+    for strategy, total_usage in strategy_usage.items():
+        avg_usage = total_usage / iterations
+        print(f"{strategy}: {avg_usage} times on average")
+
+    # Identify the strategy with the highest average coverage
+    max_strategy = max(strategy_usage, key=strategy_usage.get)
+    print(f"The strategy with the highest average coverage is {max_strategy}.")
+
+    # Identify strategies that were never used on average
+    unused_strategies = [strategy for strategy, avg_usage in strategy_usage.items() if avg_usage == 0]
+    print(f"Strategies that were never used on average: {', '.join(unused_strategies)}")
+            
+if __name__ == "__main__":
+    count_usage()
 '''
