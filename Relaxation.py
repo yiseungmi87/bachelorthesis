@@ -261,7 +261,7 @@ class ScalarToCluster(RelaxationRule):
         # Determine optimal number of clusters
         wcss = []
         for k in range(1, 11):
-            kmeans = KMeans(n_clusters=k, random_state=0).fit(combined_values)
+            kmeans = KMeans(n_clusters=k, random_state=0, n_init=10).fit(combined_values)
             wcss.append(kmeans.inertia_)
 
         # Use KneeLocator to find the elbow point
@@ -708,7 +708,7 @@ def measure_execution_time():
 if __name__ == "__main__":
     measure_execution_time()
 '''
-
+'''
 # Experiment4: Counting the Usage of Each Strategy
 def count_usage():
 
@@ -762,3 +762,4 @@ def count_usage():
             
 if __name__ == "__main__":
     count_usage()
+'''
