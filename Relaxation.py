@@ -80,7 +80,7 @@ def query_relaxation(query, strategy, predicate_indices=None):
     relaxed_query = strategy.relax_query(query, predicate_indices)
     return relaxed_query
 
-class RelaxationRule(ABC):    
+class RelaxationStrategy(ABC):    
     @abstractmethod
     def relax_query(self, query):
         self._validate_predicates(query.predicates)
@@ -124,7 +124,7 @@ class RelaxationRule(ABC):
             if predicate.operator not in valid_operators:
                 raise ValueError(f"Invalid operator '{predicate.operator}'. Operator must be one of {valid_operators}")
 
-class ScalarToRange(RelaxationRule): 
+class ScalarToRange(RelaxationStrategy): 
     def __init__(self, datasets, k):
         self.datasets = datasets
         self.k = k
@@ -171,7 +171,7 @@ class ScalarToRange(RelaxationRule):
         return relaxed_query
     
 
-class ScalarToQuartile(RelaxationRule):
+class ScalarToQuartile(RelaxationStrategy):
     def __init__(self, datasets):
         self.datasets = datasets
 
@@ -211,7 +211,7 @@ class ScalarToQuartile(RelaxationRule):
         return relaxed_query
     
 
-class ScalarToCluster(RelaxationRule):
+class ScalarToCluster(RelaxationStrategy):
     def __init__(self, datasets):
         self.datasets = datasets
 
@@ -261,6 +261,7 @@ class ScalarToCluster(RelaxationRule):
         # Determine optimal number of clusters
         wcss = []
         for k in range(1, 11):
+            # Perform k-means clustering
             kmeans = KMeans(n_clusters=k, random_state=0, n_init=10).fit(combined_values)
             wcss.append(kmeans.inertia_)
 
@@ -283,7 +284,7 @@ class ScalarToCluster(RelaxationRule):
         return relaxed_query
 
 
-class MeanToMinMax(RelaxationRule):
+class MeanToMinMax(RelaxationStrategy):
     def __init__(self, datasets):
         self.datasets = datasets
 
@@ -369,7 +370,7 @@ class MeanToMinMax(RelaxationRule):
         
         return statistics.median(differences)
 
-class CountToRatio(RelaxationRule):
+class CountToRatio(RelaxationStrategy):
     def __init__(self, datasets, range=0.1):
         self.datasets = datasets
         self.range = range
@@ -455,7 +456,7 @@ class CountToRatio(RelaxationRule):
         return sum(values) / len(values)
     
         
-class TotalToFeature(RelaxationRule):
+class TotalToFeature(RelaxationStrategy):
     def __init__(self, proportion=0.75):
         self.proportion = proportion
 
@@ -658,7 +659,7 @@ if __name__ == "__main__":
     apply_each_predicate()
 '''
 
-'''
+
 # Experiment3: Measure Execution Time for 20 benchmark queries
 def measure_execution_time():
     
@@ -707,7 +708,7 @@ def measure_execution_time():
 
 if __name__ == "__main__":
     measure_execution_time()
-'''
+
 '''
 # Experiment4: Counting the Usage of Each Strategy
 def count_usage():
