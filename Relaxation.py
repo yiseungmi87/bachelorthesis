@@ -269,7 +269,7 @@ class ScalarToCluster(RelaxationRule):
         n_clusters = kn.elbow
 
         # Perform k-means clustering
-        kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(combined_values)
+        kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init=10).fit(combined_values)
         clusters = kmeans.labels_
 
         # Find cluster that original query belongs to
