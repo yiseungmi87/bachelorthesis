@@ -659,7 +659,7 @@ if __name__ == "__main__":
     apply_each_predicate()
 '''
 
-
+'''
 # Experiment3: Measure Execution Time for 20 benchmark queries
 def measure_execution_time():
     
@@ -708,7 +708,7 @@ def measure_execution_time():
 
 if __name__ == "__main__":
     measure_execution_time()
-
+'''
 '''
 # Experiment4: Counting the Usage of Each Strategy
 def count_usage():
